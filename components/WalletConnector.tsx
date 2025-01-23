@@ -1,233 +1,169 @@
-"use client"
+import { ethers } from "ethers"
+import type { Window as KeplrWindow } from "@keplr-wallet/types"
 
-import { useState, useEffect } from "react"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { AlertCircle, Loader2 } from "lucide-react"
-import { connectMetaMask, connectKeplr, fetchKeplrBalances } from "../utils/walletUtils"
-import { ValidatorList } from "./ValidatorList"
+declare global {
+  interface Window extends KeplrWindow {}
+}
 
-type WalletInfo = {
-  address: string
-  type: "MetaMask" | "Keplr"
-  name?: string
-  availableAmount?: string
-  stakedAmount?: string
-  claimableReward?: string
-  portfolioValue?: string
-  exchangeRates?: {
-    usd: number
-    eur: number
-  }
-  validatorInfo?: Array<{
-    validatorAddress: string
-    validatorName: string
-    stakedAmount: string
-    claimableReward: string
-  }>
-} | null
-
-export default function WalletConnector() {
-  const [walletInfo, setWalletInfo] = useState<WalletInfo>(null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [isBalanceLoading, setIsBalanceLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    async function fetchBalances() {
-      if (walletInfo?.type === "Keplr" && walletInfo.address) {
-        setIsBalanceLoading(true)
-        try {
-          const balances = await fetchKeplrBalances(walletInfo.address)
-          setWalletInfo((prev) => (prev ? ({ ...prev, ...balances } as WalletInfo) : null))
-        } catch (error) {
-          console.error("Failed to fetch balances:", error)
-          setError("Failed to fetch wallet balances. Please try again.")
-        } finally {
-          setIsBalanceLoading(false)
-        }
-      }
-    }
-
-    if (walletInfo?.type === "Keplr") {
-      fetchBalances()
-    }
-  }, [walletInfo?.address])
-
-  const handleConnectWallet = async (walletType: "MetaMask" | "Keplr") => {
-    setIsLoading(true)
-    setError(null)
+export async function connectMetaMask() {
+  if (typeof window.ethereum !== "undefined") {
     try {
-      const info = walletType === "MetaMask" ? await connectMetaMask() : await connectKeplr()
-      setWalletInfo(info as WalletInfo)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "An unknown error occurred")
-      console.error("Connection error:", err)
-    } finally {
-      setIsLoading(false)
+      await window.ethereum.request({ method: "eth_requestAccounts" })
+      const provider = new ethers.providers.Web3Provider(window.ethereum)
+      const signer = provider.getSigner()
+      const address = await signer.getAddress()
+      return { address, type: "MetaMask" as const }
+    } catch (error) {
+      console.error("Failed to connect to MetaMask:", error)
+      throw new Error("Failed to connect to MetaMask. Please check if MetaMask is installed and unlocked.")
+    }
+  } else {
+    throw new Error("MetaMask not detected. Please install MetaMask extension.")
+  }
+}
+
+export async function connectKeplr() {
+  if (typeof window.keplr === "undefined") {
+    throw new Error("Keplr extension not detected. Please install Keplr extension.")
+  }
+
+  const chainId = "cosmoshub-4"
+
+  try {
+    await window.keplr.enable(chainId)
+    const offlineSigner = window.keplr.getOfflineSigner(chainId)
+    const accounts = await offlineSigner.getAccounts()
+
+    if (accounts.length === 0) {
+      throw new Error("No accounts found in Keplr wallet.")
+    }
+
+    const address = accounts[0].address
+    const key = await window.keplr.getKey(chainId)
+
+    return {
+      address,
+      type: "Keplr" as const,
+      name: key.name,
+      pubKey: Buffer.from(key.pubKey).toString("base64"),
+      isNanoLedger: key.isNanoLedger,
+    }
+  } catch (error) {
+    console.error("Failed to connect to Keplr:", error)
+    throw new Error("Failed to connect to Keplr. Please check if your wallet is unlocked and try again.")
+  }
+}
+
+async function fetchExchangeRates() {
+  try {
+    const response = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=cosmos&vs_currencies=usd,eur")
+    const data = await response.json()
+    return {
+      usd: data.cosmos.usd,
+      eur: data.cosmos.eur,
+    }
+  } catch (error) {
+    console.error("Failed to fetch exchange rates:", error)
+    return { usd: 0, eur: 0 }
+  }
+}
+
+async function fetchValidatorInfo(address: string) {
+  try {
+    const rpcEndpoint = "https://rest.cosmos.directory/cosmoshub"
+
+    // Fetch delegations
+    const delegationsResponse = await fetch(`${rpcEndpoint}/cosmos/staking/v1beta1/delegations/${address}`)
+    const delegationsData = await delegationsResponse.json()
+
+    // Fetch rewards
+    const rewardsResponse = await fetch(`${rpcEndpoint}/cosmos/distribution/v1beta1/delegators/${address}/rewards`)
+    const rewardsData = await rewardsResponse.json()
+
+    // Fetch validator details for each validator
+    const validatorDetailsPromises = delegationsData.delegation_responses.map(async (delegation: any) => {
+      const validatorResponse = await fetch(
+        `${rpcEndpoint}/cosmos/staking/v1beta1/validators/${delegation.delegation.validator_address}`,
+      )
+      return validatorResponse.json()
+    })
+
+    const validatorDetails = await Promise.all(validatorDetailsPromises)
+
+    // Process and combine the data
+    const validatorInfo = delegationsData.delegation_responses.map((delegation: any, index: number) => {
+      const reward = rewardsData.rewards.find(
+        (r: any) => r.validator_address === delegation.delegation.validator_address,
+      )
+      const rewardAmount = reward ? reward.reward.find((r: any) => r.denom === "uatom")?.amount : "0"
+      const validatorName = validatorDetails[index]?.validator?.description?.moniker || "Unknown Validator"
+
+      return {
+        validatorAddress: delegation.delegation.validator_address,
+        validatorName: validatorName,
+        stakedAmount: (Number.parseFloat(delegation.balance.amount) / 1000000).toFixed(6),
+        claimableReward: (Number.parseFloat(rewardAmount) / 1000000).toFixed(6),
+      }
+    })
+
+    return validatorInfo
+  } catch (error) {
+    console.error("Failed to fetch validator info:", error)
+    return []
+  }
+}
+
+export async function fetchKeplrBalances(address: string) {
+  try {
+    const chainId = "cosmoshub-4"
+    const rpcEndpoint = "https://rest.cosmos.directory/cosmoshub"
+
+    // Fetch available balance
+    const balanceResponse = await fetch(`${rpcEndpoint}/cosmos/bank/v1beta1/balances/${address}`)
+    const balanceData = await balanceResponse.json()
+    const atomBalance = balanceData.balances.find((coin: any) => coin.denom === "uatom")
+    const availableAmount = atomBalance ? Number.parseFloat(atomBalance.amount) / 1000000 : 0
+
+    // Fetch staked balance
+    const stakedResponse = await fetch(`${rpcEndpoint}/cosmos/staking/v1beta1/delegations/${address}`)
+    const stakedData = await stakedResponse.json()
+    const stakedAmount = stakedData.delegation_responses.reduce((sum: number, delegation: any) => {
+      return sum + Number.parseFloat(delegation.balance.amount) / 1000000
+    }, 0)
+
+    // Fetch claimable rewards
+    const rewardsResponse = await fetch(`${rpcEndpoint}/cosmos/distribution/v1beta1/delegators/${address}/rewards`)
+    const rewardsData = await rewardsResponse.json()
+    const claimableReward = rewardsData.total.find((reward: any) => reward.denom === "uatom")
+    const claimableAmount = claimableReward ? Number.parseFloat(claimableReward.amount) / 1000000 : 0
+
+    // Fetch exchange rates
+    const exchangeRates = await fetchExchangeRates()
+
+    // Calculate total portfolio value
+    const portfolioValue = availableAmount + stakedAmount + claimableAmount
+
+    // Fetch validator information
+    const validatorInfo = await fetchValidatorInfo(address)
+
+    return {
+      availableAmount: availableAmount.toFixed(6),
+      stakedAmount: stakedAmount.toFixed(6),
+      claimableReward: claimableAmount.toFixed(6),
+      portfolioValue: portfolioValue.toFixed(6),
+      exchangeRates: exchangeRates,
+      validatorInfo: validatorInfo,
+    }
+  } catch (error) {
+    console.error("Failed to fetch balances:", error)
+    return {
+      availableAmount: "0",
+      stakedAmount: "0",
+      claimableReward: "0",
+      portfolioValue: "0",
+      exchangeRates: { usd: 0, eur: 0 },
+      validatorInfo: [],
     }
   }
-
-  const handleDisconnect = () => {
-    setWalletInfo(null)
-    setError(null)
-  }
-
-  const formatCurrency = (amount: number, currency: string) => {
-    return new Intl.NumberFormat("fr-FR", { style: "currency", currency: currency }).format(amount)
-  }
-
-  return (
-    <Card className="w-[800px]">
-      <CardHeader>
-        <CardTitle>Crypto Wallet Connector</CardTitle>
-        <CardDescription>Connect to MetaMask or Keplr</CardDescription>
-      </CardHeader>
-      <CardContent>
-        {error && (
-          <Alert variant="destructive" className="mb-4">
-            <AlertCircle className="h-4 w-4" />
-            <AlertTitle>Error</AlertTitle>
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-        {isLoading ? (
-          <div className="flex items-center justify-center space-x-2">
-            <Loader2 className="h-5 w-5 animate-spin" />
-            <p>Connecting to wallet...</p>
-          </div>
-        ) : walletInfo ? (
-          <div className="space-y-4">
-            <div>
-              <p>
-                <strong>Connected to:</strong> {walletInfo.type}
-              </p>
-              {walletInfo.name && (
-                <p>
-                  <strong>Name:</strong> {walletInfo.name}
-                </p>
-              )}
-              <p>
-                <strong>Address:</strong> {walletInfo.address}
-              </p>
-            </div>
-            {walletInfo.type === "Keplr" &&
-              (isBalanceLoading ? (
-                <div className="flex items-center justify-center space-x-2">
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                  <p>Fetching balances...</p>
-                </div>
-              ) : (
-                <>
-                  <div className="bg-gray-100 p-4 rounded-md">
-                    <h3 className="font-semibold mb-2">Exchange Rates</h3>
-                    <p>1 ATOM = {formatCurrency(walletInfo.exchangeRates?.usd || 0, "USD")}</p>
-                    <p>1 ATOM = {formatCurrency(walletInfo.exchangeRates?.eur || 0, "EUR")}</p>
-                  </div>
-                  <div className="space-y-2">
-                    <h3 className="font-semibold">Wallet Balances</h3>
-                    <div className="grid grid-cols-4 gap-2">
-                      <div></div>
-                      <div className="font-medium">ATOM</div>
-                      <div className="font-medium">EUR</div>
-                      <div className="font-medium">USD</div>
-                      <div>Available:</div>
-                      <div>{walletInfo.availableAmount}</div>
-                      <div>
-                        {formatCurrency(
-                          Number.parseFloat(walletInfo.availableAmount || "0") * (walletInfo.exchangeRates?.eur || 0),
-                          "EUR",
-                        )}
-                      </div>
-                      <div>
-                        {formatCurrency(
-                          Number.parseFloat(walletInfo.availableAmount || "0") * (walletInfo.exchangeRates?.usd || 0),
-                          "USD",
-                        )}
-                      </div>
-                      <div>Staked:</div>
-                      <div>{walletInfo.stakedAmount}</div>
-                      <div>
-                        {formatCurrency(
-                          Number.parseFloat(walletInfo.stakedAmount || "0") * (walletInfo.exchangeRates?.eur || 0),
-                          "EUR",
-                        )}
-                      </div>
-                      <div>
-                        {formatCurrency(
-                          Number.parseFloat(walletInfo.stakedAmount || "0") * (walletInfo.exchangeRates?.usd || 0),
-                          "USD",
-                        )}
-                      </div>
-                      <div>Claimable:</div>
-                      <div>{walletInfo.claimableReward}</div>
-                      <div>
-                        {formatCurrency(
-                          Number.parseFloat(walletInfo.claimableReward || "0") * (walletInfo.exchangeRates?.eur || 0),
-                          "EUR",
-                        )}
-                      </div>
-                      <div>
-                        {formatCurrency(
-                          Number.parseFloat(walletInfo.claimableReward || "0") * (walletInfo.exchangeRates?.usd || 0),
-                          "USD",
-                        )}
-                      </div>
-                      <div className="font-semibold">Total:</div>
-                      <div className="font-semibold">{walletInfo.portfolioValue}</div>
-                      <div className="font-semibold">
-                        {formatCurrency(
-                          Number.parseFloat(walletInfo.portfolioValue || "0") * (walletInfo.exchangeRates?.eur || 0),
-                          "EUR",
-                        )}
-                      </div>
-                      <div className="font-semibold">
-                        {formatCurrency(
-                          Number.parseFloat(walletInfo.portfolioValue || "0") * (walletInfo.exchangeRates?.usd || 0),
-                          "USD",
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                  {walletInfo.validatorInfo && walletInfo.validatorInfo.length > 0 && (
-                    <ValidatorList
-                      validators={walletInfo.validatorInfo}
-                      exchangeRates={walletInfo.exchangeRates || { usd: 0, eur: 0 }}
-                    />
-                  )}
-                </>
-              ))}
-          </div>
-        ) : (
-          <p>Not connected to any wallet</p>
-        )}
-      </CardContent>
-      <CardFooter className="flex justify-between">
-        {!walletInfo ? (
-          <>
-            <Button
-              onClick={() => handleConnectWallet("MetaMask")}
-              disabled={isLoading}
-              className="flex items-center space-x-2"
-            >
-              {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              <span>Connect MetaMask</span>
-            </Button>
-            <Button
-              onClick={() => handleConnectWallet("Keplr")}
-              disabled={isLoading}
-              className="flex items-center space-x-2"
-            >
-              {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              <span>Connect Keplr</span>
-            </Button>
-          </>
-        ) : (
-          <Button onClick={handleDisconnect}>Disconnect</Button>
-        )}
-      </CardFooter>
-    </Card>
-  )
 }
 
