@@ -12,7 +12,7 @@ export async function connectMetaMask() {
       const provider = new ethers.providers.Web3Provider(window.ethereum)
       const signer = provider.getSigner()
       const address = await signer.getAddress()
-      return { address, type: "MetaMask" }
+      return { address, type: "MetaMask" as const }
     } catch (error) {
       console.error("Failed to connect to MetaMask:", error)
       throw new Error("Failed to connect to MetaMask. Please check if MetaMask is installed and unlocked.")
@@ -43,7 +43,7 @@ export async function connectKeplr() {
 
     return {
       address,
-      type: "Keplr",
+      type: "Keplr" as const,
       name: key.name,
       pubKey: Buffer.from(key.pubKey).toString("base64"),
       isNanoLedger: key.isNanoLedger,
