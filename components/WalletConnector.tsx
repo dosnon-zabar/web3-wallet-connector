@@ -40,7 +40,7 @@ export default function WalletConnector() {
         setIsBalanceLoading(true)
         try {
           const balances = await fetchKeplrBalances(walletInfo.address)
-          setWalletInfo((prev) => (prev ? { ...prev, ...balances } : null))
+          setWalletInfo((prev) => (prev ? ({ ...prev, ...balances } as WalletInfo) : null))
         } catch (error) {
           console.error("Failed to fetch balances:", error)
           setError("Failed to fetch wallet balances. Please try again.")
@@ -60,7 +60,7 @@ export default function WalletConnector() {
     setError(null)
     try {
       const info = walletType === "MetaMask" ? await connectMetaMask() : await connectKeplr()
-      setWalletInfo(info)
+      setWalletInfo(info as WalletInfo)
     } catch (err) {
       setError(err instanceof Error ? err.message : "An unknown error occurred")
       console.error("Connection error:", err)
